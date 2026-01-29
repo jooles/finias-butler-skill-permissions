@@ -13,6 +13,14 @@ interface PluginConfig {
   logInstallAttempts: boolean;
 }
 
+interface PluginAPI {
+  logger: {
+    info: (msg: string) => void;
+    error: (msg: string) => void;
+  };
+  pluginConfig: PluginConfig;
+}
+
 interface HookEvent {
   type: 'agent' | 'gateway' | 'command' | 'session';
   action: string;
@@ -41,9 +49,13 @@ const LOG_FILE = join(LOG_DIR, 'skill-permissions.log');
 
 let config: PluginConfig;
 let server: ReturnType<typeof createServer> | null = null;
+let logger: PluginAPI['logger'] = {
+  info: (msg: string) => console.log(`\x1b[36m${msg}\x1b[39m`),
+  error: (msg: string) => console.error(`\x1b[31m${msg}\x1b[39m`)
+};
 
 function log(message: string) {
-  console.log(`\x1b[36m[finias-skill-permissions] ${message}\x1b[39m`);
+  logger.info(`[finias-skill-permissions] ${message}`);
 }
 
 function loadConfig(): PluginConfig {
@@ -406,12 +418,27 @@ Diese Regel ist VERBINDLICH für alle Skill-Installationen!
   log('Skill-Permission-Instruktion injiziert');
 };
 
-// ===== Plugin Init =====
-export default function init(pluginConfig: PluginConfig) {
+// ===== Plugin Registration =====
+export default function register(api: PluginAPI) {
+  logger = api.logger;
   log('===== PLUGIN LOADING =====');
 
-  config = { ...loadConfig(), ...pluginConfig };
+  const pluginConfig = api.pluginConfig || {};
+  log(`Received config: ${JSON.stringify(pluginConfig, null, 2)}`);
+
+  // Merge saved config with plugin config (plugin config takes precedence)
+  const savedConfig = loadConfig();
+  config = {
+    port: pluginConfig.port ?? savedConfig.port ?? 18803,
+    password: pluginConfig.password ?? savedConfig.password ?? '',
+    defaultPolicy: pluginConfig.defaultPolicy ?? savedConfig.defaultPolicy ?? 'deny',
+    allowedUsers: pluginConfig.allowedUsers ?? savedConfig.allowedUsers ?? [],
+    deniedUsers: pluginConfig.deniedUsers ?? savedConfig.deniedUsers ?? [],
+    logInstallAttempts: pluginConfig.logInstallAttempts ?? savedConfig.logInstallAttempts ?? true
+  };
+
   log(`Port: ${config.port}`);
+  log(`Password set: ${config.password ? 'yes' : 'no'}`);
   log(`Standard-Richtlinie: ${config.defaultPolicy}`);
   log(`Erlaubte Benutzer: ${config.allowedUsers.length}`);
   log(`Gesperrte Benutzer: ${config.deniedUsers.length}`);
