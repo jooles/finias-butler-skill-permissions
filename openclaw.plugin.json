@@ -1,0 +1,53 @@
+{
+  "id": "finias-skill-permissions",
+  "name": "finias Skill Permissions",
+  "version": "1.0.0",
+  "description": "Kontrolliert welche Benutzer Skills installieren dürfen",
+  "author": "finias",
+  "entry": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "port": {
+        "type": "number",
+        "default": 18803,
+        "description": "Port für den HTTP-Server"
+      },
+      "password": {
+        "type": "string",
+        "description": "Admin-Passwort für die API"
+      },
+      "defaultPolicy": {
+        "type": "string",
+        "enum": ["allow", "deny"],
+        "default": "deny",
+        "description": "Standard-Richtlinie für nicht gelistete Benutzer"
+      },
+      "allowedUsers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Liste der Benutzer-IDs die Skills installieren dürfen"
+      },
+      "deniedUsers": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Liste der Benutzer-IDs die KEINE Skills installieren dürfen"
+      },
+      "logInstallAttempts": {
+        "type": "boolean",
+        "default": true,
+        "description": "Installationsversuche loggen"
+      }
+    },
+    "required": ["port", "password"]
+  },
+  "hooks": ["agent:bootstrap"],
+  "management": {
+    "label": "Skill Permissions",
+    "icon": "shield",
+    "apiBase": "/api",
+    "capabilities": ["config", "users"]
+  }
+}

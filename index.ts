@@ -44,7 +44,7 @@ interface InstallLog {
 
 // ===== Config =====
 const CONFIG_FILE = join(dirname(import.meta.url.replace('file://', '')), 'permissions.json');
-const LOG_DIR = join(homedir(), '.clawdbot', 'logs');
+const LOG_DIR = join(homedir(), '.openclaw', 'logs');
 const LOG_FILE = join(LOG_DIR, 'skill-permissions.log');
 
 let config: PluginConfig;
@@ -424,7 +424,6 @@ export default function register(api: PluginAPI) {
   log('===== PLUGIN LOADING =====');
 
   const pluginConfig = api.pluginConfig || {};
-  log(`Received config: ${JSON.stringify(pluginConfig, null, 2)}`);
 
   // Merge saved config with plugin config (plugin config takes precedence)
   const savedConfig = loadConfig();
