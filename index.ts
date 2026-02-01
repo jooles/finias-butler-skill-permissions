@@ -1,12 +1,23 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+/**
+ * finias Skill Permissions Plugin
+ *
+ * Controls which users can install skills.
+ * - Permission checking via tools (no standalone server needed)
+ * - Admin UI routes should be registered through finias-management
+ *
+ * NOTE: This plugin NO LONGER runs its own web server.
+ */
+
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 
+// Use globalThis.registerFiniasRoute instead of import (set by management plugin)
+
 // ===== Types =====
 interface PluginConfig {
-  port: number;
-  password: string;
+  port?: number;
+  password?: string;
   defaultPolicy: 'allow' | 'deny';
   allowedUsers: string[];
   deniedUsers: string[];
@@ -19,19 +30,6 @@ interface PluginAPI {
     error: (msg: string) => void;
   };
   pluginConfig: PluginConfig;
-}
-
-interface HookEvent {
-  type: 'agent' | 'gateway' | 'command' | 'session';
-  action: string;
-  context?: AgentBootstrapContext;
-}
-
-interface AgentBootstrapContext {
-  modelId: string;
-  bootstrapFiles: Map<string, string>;
-  sessionKey: string;
-  agentId: string;
 }
 
 interface InstallLog {
@@ -48,7 +46,6 @@ const LOG_DIR = join(homedir(), '.openclaw', 'logs');
 const LOG_FILE = join(LOG_DIR, 'skill-permissions.log');
 
 let config: PluginConfig;
-let server: ReturnType<typeof createServer> | null = null;
 let logger: PluginAPI['logger'] = {
   info: (msg: string) => console.log(`\x1b[36m${msg}\x1b[39m`),
   error: (msg: string) => console.error(`\x1b[31m${msg}\x1b[39m`)
@@ -60,8 +57,6 @@ function log(message: string) {
 
 function loadConfig(): PluginConfig {
   const defaultConfig: PluginConfig = {
-    port: 18803,
-    password: '',
     defaultPolicy: 'deny',
     allowedUsers: [],
     deniedUsers: [],
@@ -103,7 +98,7 @@ function logInstallAttempt(entry: InstallLog) {
 }
 
 // ===== Permission Logic =====
-function canInstallSkill(userId: string): { allowed: boolean; reason: string } {
+export function canInstallSkill(userId: string): { allowed: boolean; reason: string } {
   // Normalize userId (remove channel prefixes if present)
   const normalizedId = userId.replace(/^(whatsapp:|telegram:|discord:)/, '');
 
@@ -125,261 +120,9 @@ function canInstallSkill(userId: string): { allowed: boolean; reason: string } {
   return { allowed: false, reason: 'Standard-Richtlinie: Verweigert (nur Whitelist-Benutzer)' };
 }
 
-// ===== HTTP Server =====
-function sendJson(res: ServerResponse, data: unknown, status = 200) {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-  res.end(JSON.stringify(data));
-}
-
-async function parseBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
-  });
-}
-
-function handleRequest(req: IncomingMessage, res: ServerResponse) {
-  const url = new URL(req.url || '/', `http://localhost:${config.port}`);
-  const path = url.pathname;
-  const method = req.method || 'GET';
-  const auth = url.searchParams.get('auth');
-
-  // CORS preflight
-  if (method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type'
-    });
-    res.end();
-    return;
-  }
-
-  // Auth check for admin endpoints
-  const isAdmin = auth === config.password;
-
-  // ===== Public API: Check Permission =====
-  // This endpoint can be called by the agent to check if a user can install skills
-  if (path === '/api/check' && method === 'GET') {
-    const userId = url.searchParams.get('userId');
-    const skillName = url.searchParams.get('skill') || 'unknown';
-
-    if (!userId) {
-      sendJson(res, { error: 'userId parameter required' }, 400);
-      return;
-    }
-
-    const result = canInstallSkill(userId);
-
-    // Log the attempt
-    logInstallAttempt({
-      timestamp: new Date().toISOString(),
-      userId,
-      skillName,
-      allowed: result.allowed,
-      reason: result.reason
-    });
-
-    sendJson(res, {
-      userId,
-      skill: skillName,
-      allowed: result.allowed,
-      reason: result.reason,
-      message: result.allowed
-        ? `Installation von "${skillName}" erlaubt.`
-        : `Installation von "${skillName}" verweigert: ${result.reason}`
-    });
-    return;
-  }
-
-  // ===== Admin API: Get Config =====
-  if (path === '/api/config' && method === 'GET') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    sendJson(res, {
-      defaultPolicy: config.defaultPolicy,
-      allowedUsers: config.allowedUsers,
-      deniedUsers: config.deniedUsers,
-      logInstallAttempts: config.logInstallAttempts
-    });
-    return;
-  }
-
-  // ===== Admin API: Update Config =====
-  if (path === '/api/config' && method === 'PUT') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    parseBody(req).then(body => {
-      try {
-        const updates = JSON.parse(body);
-
-        if (updates.defaultPolicy !== undefined) {
-          config.defaultPolicy = updates.defaultPolicy;
-        }
-        if (updates.allowedUsers !== undefined) {
-          config.allowedUsers = updates.allowedUsers;
-        }
-        if (updates.deniedUsers !== undefined) {
-          config.deniedUsers = updates.deniedUsers;
-        }
-        if (updates.logInstallAttempts !== undefined) {
-          config.logInstallAttempts = updates.logInstallAttempts;
-        }
-
-        saveConfig();
-        sendJson(res, { success: true, config: {
-          defaultPolicy: config.defaultPolicy,
-          allowedUsers: config.allowedUsers,
-          deniedUsers: config.deniedUsers,
-          logInstallAttempts: config.logInstallAttempts
-        }});
-      } catch (err) {
-        sendJson(res, { error: 'Invalid JSON' }, 400);
-      }
-    });
-    return;
-  }
-
-  // ===== Admin API: Add User =====
-  if (path === '/api/users/allow' && method === 'POST') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    parseBody(req).then(body => {
-      try {
-        const { userId } = JSON.parse(body);
-        if (!userId) {
-          sendJson(res, { error: 'userId required' }, 400);
-          return;
-        }
-
-        // Remove from denied if present
-        config.deniedUsers = config.deniedUsers.filter(u => u !== userId);
-
-        // Add to allowed if not present
-        if (!config.allowedUsers.includes(userId)) {
-          config.allowedUsers.push(userId);
-        }
-
-        saveConfig();
-        sendJson(res, { success: true, allowedUsers: config.allowedUsers });
-      } catch {
-        sendJson(res, { error: 'Invalid JSON' }, 400);
-      }
-    });
-    return;
-  }
-
-  // ===== Admin API: Deny User =====
-  if (path === '/api/users/deny' && method === 'POST') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    parseBody(req).then(body => {
-      try {
-        const { userId } = JSON.parse(body);
-        if (!userId) {
-          sendJson(res, { error: 'userId required' }, 400);
-          return;
-        }
-
-        // Remove from allowed if present
-        config.allowedUsers = config.allowedUsers.filter(u => u !== userId);
-
-        // Add to denied if not present
-        if (!config.deniedUsers.includes(userId)) {
-          config.deniedUsers.push(userId);
-        }
-
-        saveConfig();
-        sendJson(res, { success: true, deniedUsers: config.deniedUsers });
-      } catch {
-        sendJson(res, { error: 'Invalid JSON' }, 400);
-      }
-    });
-    return;
-  }
-
-  // ===== Admin API: Remove User from lists =====
-  if (path === '/api/users/remove' && method === 'POST') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    parseBody(req).then(body => {
-      try {
-        const { userId } = JSON.parse(body);
-        if (!userId) {
-          sendJson(res, { error: 'userId required' }, 400);
-          return;
-        }
-
-        config.allowedUsers = config.allowedUsers.filter(u => u !== userId);
-        config.deniedUsers = config.deniedUsers.filter(u => u !== userId);
-
-        saveConfig();
-        sendJson(res, {
-          success: true,
-          allowedUsers: config.allowedUsers,
-          deniedUsers: config.deniedUsers
-        });
-      } catch {
-        sendJson(res, { error: 'Invalid JSON' }, 400);
-      }
-    });
-    return;
-  }
-
-  // ===== Admin API: Get Logs =====
-  if (path === '/api/logs' && method === 'GET') {
-    if (!isAdmin) {
-      sendJson(res, { error: 'Unauthorized' }, 401);
-      return;
-    }
-
-    try {
-      if (!existsSync(LOG_FILE)) {
-        sendJson(res, { logs: [] });
-        return;
-      }
-
-      const content = readFileSync(LOG_FILE, 'utf-8');
-      const logs = content.trim().split('\n')
-        .filter(line => line.trim())
-        .map(line => {
-          try { return JSON.parse(line); } catch { return null; }
-        })
-        .filter(Boolean)
-        .reverse()
-        .slice(0, 100); // Last 100 entries
-
-      sendJson(res, { logs });
-    } catch (err) {
-      sendJson(res, { error: 'Failed to read logs' }, 500);
-    }
-    return;
-  }
-
-  // 404
-  sendJson(res, { error: 'Not found' }, 404);
-}
-
 // ===== Hook Handler =====
 // Inject skill permission instruction into agent bootstrap
-export const handler = async (event: HookEvent): Promise<void> => {
+export const handler = async (event: { type: string; action: string; context?: { modelId: string; bootstrapFiles: Map<string, string>; sessionKey: string; agentId: string } }): Promise<void> => {
   if (event.type !== 'agent' || event.action !== 'bootstrap') {
     return;
   }
@@ -387,31 +130,19 @@ export const handler = async (event: HookEvent): Promise<void> => {
   const ctx = event.context;
   if (!ctx?.bootstrapFiles) return;
 
-  // Create the permission check instruction
   const instruction = `
 ## Skill Installation Permissions
 
 BEVOR du einen Skill installierst (via \`clawdhub install\` oder ähnlich), MUSST du folgende Prüfung durchführen:
 
-1. Rufe diesen API-Endpunkt auf:
-   \`\`\`
-   curl "http://localhost:${config.port}/api/check?userId={SENDER_ID}&skill={SKILL_NAME}"
-   \`\`\`
-
-2. Ersetze {SENDER_ID} mit der ID des anfragenden Benutzers (z.B. Telefonnummer, Telegram-ID)
-3. Ersetze {SKILL_NAME} mit dem Namen des zu installierenden Skills
-
-3. WENN die Antwort \`"allowed": false\` enthält:
+1. Nutze das Tool \`skill_permission_check\` mit der Benutzer-ID
+2. WENN die Antwort \`"allowed": false\` enthält:
    - Installiere den Skill NICHT
    - Informiere den Benutzer höflich, dass er keine Berechtigung hat
-   - Zeige ihm den Grund aus der API-Antwort
-
-4. NUR WENN \`"allowed": true\`: Fahre mit der Installation fort.
 
 Diese Regel ist VERBINDLICH für alle Skill-Installationen!
 `;
 
-  // Append to existing CLAUDE.md or create directive
   const existingClaude = ctx.bootstrapFiles.get('CLAUDE.md') || '';
   ctx.bootstrapFiles.set('CLAUDE.md', existingClaude + '\n' + instruction);
 
@@ -428,7 +159,6 @@ export default function register(api: PluginAPI) {
   // Merge saved config with plugin config (plugin config takes precedence)
   const savedConfig = loadConfig();
   config = {
-    port: pluginConfig.port ?? savedConfig.port ?? 18803,
     password: pluginConfig.password ?? savedConfig.password ?? '',
     defaultPolicy: pluginConfig.defaultPolicy ?? savedConfig.defaultPolicy ?? 'deny',
     allowedUsers: pluginConfig.allowedUsers ?? savedConfig.allowedUsers ?? [],
@@ -436,34 +166,156 @@ export default function register(api: PluginAPI) {
     logInstallAttempts: pluginConfig.logInstallAttempts ?? savedConfig.logInstallAttempts ?? true
   };
 
-  log(`Port: ${config.port}`);
-  log(`Password set: ${config.password ? 'yes' : 'no'}`);
   log(`Standard-Richtlinie: ${config.defaultPolicy}`);
   log(`Erlaubte Benutzer: ${config.allowedUsers.length}`);
   log(`Gesperrte Benutzer: ${config.deniedUsers.length}`);
+  log('NOTE: No standalone web server - admin UI via finias-management');
 
-  // Start HTTP server
-  server = createServer(handleRequest);
-  server.listen(config.port, '0.0.0.0', () => {
-    log(`API läuft auf Port ${config.port}`);
+  // Register permission check tool
+  api.registerTool({
+    name: 'skill_permission_check',
+    description: 'Prüfe ob ein Benutzer Skills installieren darf',
+    parameters: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', description: 'ID des Benutzers (z.B. Telefonnummer, Telegram-ID)' },
+        skillName: { type: 'string', description: 'Name des zu installierenden Skills' },
+      },
+      required: ['userId'],
+    },
+    execute: async (_id, params) => {
+      const { userId, skillName = 'unknown' } = params as { userId: string; skillName?: string };
+      const result = canInstallSkill(userId);
+
+      // Log the attempt
+      logInstallAttempt({
+        timestamp: new Date().toISOString(),
+        userId,
+        skillName,
+        allowed: result.allowed,
+        reason: result.reason
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            userId,
+            skill: skillName,
+            allowed: result.allowed,
+            reason: result.reason,
+            message: result.allowed
+              ? `Installation von "${skillName}" erlaubt.`
+              : `Installation von "${skillName}" verweigert: ${result.reason}`
+          }, null, 2)
+        }]
+      };
+    },
   });
 
-  server.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      log(`Port ${config.port} bereits belegt - Plugin läuft möglicherweise schon`);
-    } else {
-      log(`Server-Fehler: ${err.message}`);
-    }
-  });
+  // Register admin tools if configured
+  if (config.allowedUsers.length > 0 || config.deniedUsers.length > 0 || config.defaultPolicy === 'deny') {
+    api.registerTool({
+      name: 'skill_permission_status',
+      description: 'Zeigt die aktuellen Berechtigungseinstellungen',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              defaultPolicy: config.defaultPolicy,
+              allowedUsers: config.allowedUsers,
+              deniedUsers: config.deniedUsers,
+              logInstallAttempts: config.logInstallAttempts,
+            }, null, 2)
+          }]
+        };
+      },
+    });
+  }
 
   log('===== PLUGIN READY =====');
 
-  return {
-    stop: () => {
-      if (server) {
-        server.close();
-        server = null;
-      }
+  // Register routes with management plugin (with retry for load order issues)
+  function tryRegisterRoutes(attempt = 1) {
+    const registerFn = (globalThis as any).registerFiniasRoute;
+    if (registerFn) {
+      registerFn('finias-skill-permissions', [
+        { method: 'GET', path: '/api/check', handler: async (req: any, res: any) => {
+          const url = new URL(req.url || '/', 'http://localhost');
+          const userId = url.searchParams.get('userId') || '';
+          const skillName = url.searchParams.get('skill') || 'unknown';
+
+          if (!userId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'userId parameter required' }));
+            return;
+          }
+
+          const result = canInstallSkill(userId);
+          logInstallAttempt({
+            timestamp: new Date().toISOString(),
+            userId,
+            skillName,
+            allowed: result.allowed,
+            reason: result.reason
+          });
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            userId,
+            skill: skillName,
+            allowed: result.allowed,
+            reason: result.reason,
+            message: result.allowed
+              ? `Installation von "${skillName}" erlaubt.`
+              : `Installation von "${skillName}" verweigert: ${result.reason}`
+          }));
+        }},
+        { method: 'GET', path: '/api/config', handler: async (req: any, res: any) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            defaultPolicy: config.defaultPolicy,
+            allowedUsers: config.allowedUsers,
+            deniedUsers: config.deniedUsers,
+            logInstallAttempts: config.logInstallAttempts
+          }));
+        }},
+        { method: 'GET', path: '/api/logs', handler: async (req: any, res: any) => {
+          try {
+            if (!existsSync(LOG_FILE)) {
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ logs: [] }));
+              return;
+            }
+            const content = readFileSync(LOG_FILE, 'utf-8');
+            const logs = content.trim().split('\n').filter(l => l.trim()).map(line => {
+              try { return JSON.parse(line); } catch { return null; }
+            }).filter(Boolean).reverse().slice(0, 100);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ logs }));
+          } catch {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to read logs' }));
+          }
+        }},
+      ]);
+      log('Routes registered with management plugin');
+    } else if (attempt < 10) {
+      setTimeout(() => tryRegisterRoutes(attempt + 1), 100);
+    } else {
+      log('registerFiniasRoute not available after 10 attempts - routes not registered');
     }
-  };
+  }
+  tryRegisterRoutes();
 }
+
+// Cleanup - no server to close
+process.on('SIGTERM', () => {
+  // No cleanup needed
+});
+
+process.on('SIGINT', () => {
+  // No cleanup needed
+});
