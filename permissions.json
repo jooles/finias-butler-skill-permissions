@@ -1,0 +1,9 @@
+{
+  "defaultPolicy": "deny",
+  "allowedUsers": [
+    "+491602244669",
+    "9234637"
+  ],
+  "deniedUsers": [],
+  "logInstallAttempts": true
+}
